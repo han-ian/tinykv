@@ -17,6 +17,8 @@ package raft
 import (
 	"errors"
 
+	"github.com/pingcap-incubator/tinykv/log"
+
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -165,7 +167,23 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	return nil
+
+	raftLog := newLog(c.Storage)
+
+	r := &Raft{
+		id: c.ID,
+		// State: StateFollower,
+
+		RaftLog: raftLog,
+		Prs: make(map[uint64]*Progress),
+
+		heartbeatTimeout: c.HeartbeatTick,
+		electionTimeout: c.ElectionTick,
+	}
+
+	r.becomeFollower(r.Term, None)
+
+	return r
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -183,22 +201,76 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	switch r.State {
+	case StateFollower:
+		// switch to Candidate if needed.
+		r.tickElection()
+	case StateCandidate:
+		// election 
+		r.tickElection()
+	case StateLeader:
+		// send heartBeat
+		r.tickHeatbeat()
+	}
+
+}
+
+func(r *Raft) tickElection(){
+	r.electionElapsed ++ 
+	if r.electionElapsed > r.electionTimeout {
+		err := r.Step(pb.Message{From: r.id, MsgType: pb.MessageType_MsgHup})
+		if err != nil {
+			log.Warnf("tickElection, error occurred during election: %v ", err)
+		}
+	}
+}
+
+func(r *Raft) tickHeatbeat(){
+	
 }
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+	r.reset(r.Term)
+
+	r.Lead = lead
+	r.Term = term 
+	r.State = StateFollower
+
+	// TODO: remove invalid entries from r.raftLog.entries.
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	r.reset(r.Term + 1)
+
+	r.State = StateCandidate
+	r.Vote = r.id	// vote for myself
+	r.votes = make(map[uint64]bool)
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+
+	r.reset(r.Term)
+	r.State = StateLeader
+
+	// TODO: propose a noop entry.
+}
+
+func (r *Raft) reset(term uint64){
+	if r.Term != term {
+		r.Term = term
+		r.Vote = None
+	}
+	r.Lead = 0
+
+	r.electionElapsed = 0
+	r.heartbeatElapsed = 0
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -207,10 +279,40 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	switch r.State {
 	case StateFollower:
+		return r.stepFollower(m)
 	case StateCandidate:
+		return r.stepCandidate(m)
 	case StateLeader:
+		return r.stepLeader(m)
 	}
 	return nil
+}
+
+func (r *Raft) stepLeader(m pb.Message) error {
+	return nil
+}
+
+func (r *Raft) stepFollower(m pb.Message) error {
+	switch m.MsgType{
+	case pb.MessageType_MsgHup:
+		r.becomeCandidate()
+	}
+	return nil
+}
+
+func (r *Raft) stepCandidate(m pb.Message) error {
+	switch m.MsgType{
+	case pb.MessageType_MsgHeartbeat:
+		r.becomeFollower(m.Term, m.From)
+	case pb.MessageType_MsgPropose:
+		log.Infof("%d not leader at term %d; dropping proposal", r.id, r.Term)
+	}
+	return nil
+}
+
+// messages need to send
+func (r *Raft) send(m pb.Message) {
+	r.msgs = append(r.msgs, m)
 }
 
 // handleAppendEntries handle AppendEntries RPC request
