@@ -92,6 +92,12 @@ func (l *RaftLog) LastIndex() uint64 {
 	return 0
 }
 
+// LastIndex return the last term of the log entries
+func (l *RaftLog) LastTerm() uint64 {
+	// Your Code Here (2A).
+	return 0
+}
+
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).

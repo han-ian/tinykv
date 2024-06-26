@@ -277,13 +277,63 @@ func (r *Raft) reset(term uint64){
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	switch r.State {
-	case StateFollower:
-		return r.stepFollower(m)
-	case StateCandidate:
-		return r.stepCandidate(m)
-	case StateLeader:
-		return r.stepLeader(m)
+
+	switch{
+	case m.Term == 0:
+		// local message ?
+	case m.Term > r.Term:
+		if m.MsgType == pb.MessageType_MsgRequestVote {
+			inLease := r.Lead != None && r.electionElapsed < r.electionTimeout
+			if inLease {
+				lastIndex := r.RaftLog.LastIndex()
+				lastTerm  := r.RaftLog.LastTerm()
+				log.Infof("%x [logterm: %d, index: %d] ignored %s from %x [logterm: %d, index: %d] at term %d: lease is not expired (remaining ticks: %d)",
+				r.id, lastTerm, lastIndex, m.MsgType, m.From, m.LogTerm, m.Index, m.Term, r.electionTimeout - r.electionElapsed)
+				return nil
+			}
+
+			// in other case, deal with RequestVote.
+		}
+
+		switch {
+			default:
+				log.Infof("%x [term: %d] received a %s message with higher term from %x [term: %d]", r.id, r.Term, m.MsgType, m.From, m.Term)
+				if m.MsgType == pb.MessageType_MsgAppend || m.MsgType == pb.MessageType_MsgHeartbeat || m.MsgType == pb.MessageType_MsgSnapshot {
+					r.becomeFollower(m.Term, m.From)
+				}else{
+					r.becomeFollower(m.Term, None)
+				}
+		}
+
+	case m.Term < r.Term:
+		log.Infof("%x [term: %d] ignored a %s message with lower term from %x [term: %d]",
+				r.id, r.Term, m.MsgType, m.From, m.Term)
+
+		// ignoer all message types.
+		return nil
+	}
+
+	switch m.MsgType {
+	case pb.MessageType_MsgHup:
+		r.hup()
+	case pb.MessageType_MsgRequestVote:
+		canVote :=  r.Vote == m.From || (r.Vote == None && r.Lead == None)
+		if canVote {
+			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgRequestVoteResponse})
+			r.electionElapsed = 0
+			r.Vote = m.From
+		}else{
+			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgRequestVoteResponse, Reject: true})
+		}
+	default:
+		switch r.State{
+		case StateLeader:
+			r.stepLeader(m)
+		case StateCandidate:
+			r.stepCandidate(m)
+		case StateFollower:
+			r.stepFollower(m)
+		}
 	}
 	return nil
 }
@@ -302,6 +352,8 @@ func (r *Raft) stepFollower(m pb.Message) error {
 
 func (r *Raft) stepCandidate(m pb.Message) error {
 	switch m.MsgType{
+	case pb.MessageType_MsgHup:
+		
 	case pb.MessageType_MsgHeartbeat:
 		r.becomeFollower(m.Term, m.From)
 	case pb.MessageType_MsgPropose:
@@ -310,9 +362,35 @@ func (r *Raft) stepCandidate(m pb.Message) error {
 	return nil
 }
 
+func (r *Raft) hup(){
+	if r.State == StateLeader {
+		log.Warnf("%x ignoring MsgHup because already leader", r.id)
+		return
+	}
+
+	r.campaign()
+}
+
+// 发起新的一轮选举;
+func (r *Raft)campaign(){
+	r.becomeCandidate()
+
+	lastIndexId := r.RaftLog.LastIndex()
+	lastLogTerm := r.RaftLog.LastTerm()
+	for id, _ := range r.Prs {
+		r.send(pb.Message{From:r.id, To: id, Term: r.Term, MsgType: pb.MessageType_MsgRequestVote, Index: lastIndexId, LogTerm: lastLogTerm})
+	}
+}
+
 // messages need to send
 func (r *Raft) send(m pb.Message) {
 	r.msgs = append(r.msgs, m)
+}
+
+func (r *Raft) readMessages() []pb.Message {
+	msgs := r.msgs
+	r.msgs = make([]pb.Message, 0)
+	return msgs
 }
 
 // handleAppendEntries handle AppendEntries RPC request
