@@ -181,6 +181,10 @@ func newRaft(c *Config) *Raft {
 		electionTimeout: c.ElectionTick,
 	}
 
+	for _, id := range c.peers {
+		r.Prs[id] = &Progress{}
+	}
+
 	r.becomeFollower(r.Term, None)
 
 	return r
@@ -260,6 +264,7 @@ func (r *Raft) becomeLeader() {
 	r.State = StateLeader
 
 	// TODO: propose a noop entry.
+	// send msg to followers.
 }
 
 func (r *Raft) reset(term uint64){
@@ -319,11 +324,11 @@ func (r *Raft) Step(m pb.Message) error {
 	case pb.MessageType_MsgRequestVote:
 		canVote :=  r.Vote == m.From || (r.Vote == None && r.Lead == None)
 		if canVote {
-			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgRequestVoteResponse})
+			r.send(pb.Message{From: r.id, To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgRequestVoteResponse})
 			r.electionElapsed = 0
 			r.Vote = m.From
 		}else{
-			r.send(pb.Message{To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgRequestVoteResponse, Reject: true})
+			r.send(pb.Message{From: r.id, To: m.From, Term: r.Term, MsgType: pb.MessageType_MsgRequestVoteResponse, Reject: true})
 		}
 	default:
 		switch r.State{
@@ -351,9 +356,14 @@ func (r *Raft) stepFollower(m pb.Message) error {
 }
 
 func (r *Raft) stepCandidate(m pb.Message) error {
+	log.Infof("stepCandidate, %x, %s", r.id, m.MsgType)
 	switch m.MsgType{
 	case pb.MessageType_MsgHup:
-		
+	case pb.MessageType_MsgRequestVoteResponse:
+		res := r.poll(m.From, !m.Reject)
+		if res {
+			r.becomeLeader()
+		}
 	case pb.MessageType_MsgHeartbeat:
 		r.becomeFollower(m.Term, m.From)
 	case pb.MessageType_MsgPropose:
@@ -382,8 +392,23 @@ func (r *Raft)campaign(){
 	}
 }
 
+func (r *Raft) poll(from uint64, vote bool)bool{
+	if !vote {
+		return false
+	}
+	r.votes[from] = true
+	if len(r.votes) > 1 + len(r.Prs)/2 {
+		return true
+	}
+
+	return false
+}
+
 // messages need to send
 func (r *Raft) send(m pb.Message) {
+	m.From = r.id
+
+	log.Infof("send msg, from %x to %x, %s", m.From, m.To, m.MsgType)
 	r.msgs = append(r.msgs, m)
 }
 
